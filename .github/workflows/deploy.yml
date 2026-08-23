@@ -1,0 +1,43 @@
+name: Deploy AWS Lambda + Glue Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: us-east-1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install AWS SAM CLI
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install "aws-sam-cli>=2.0.0"
+
+      - name: Build SAM application
+        run: sam build
+
+      - name: Deploy SAM stack
+        run: |
+          sam deploy --stack-name lambda-glue-pipeline \
+            --no-confirm-changeset \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --resolve-s3 \
+            --region $AWS_REGION

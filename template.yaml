@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: |
+  Serverless deployment for an S3-triggered Lambda that validates CSV files and starts an AWS Glue job.
+
+Globals:
+  Function:
+    Timeout: 120
+    Runtime: python3.11
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "lambda-glue-data-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}"
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration: {}
+
+  TriggerCheckerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-trigger-checker"
+      Handler: trigger_checker.lambda_handler
+      CodeUri: src/lambda/
+      Runtime: python3.11
+      Environment:
+        Variables:
+          GLUE_JOB_NAME: !Ref PartitionGlueJobName
+          GLUE_SCRIPT_KEY: glue-scripts/partition_job.py
+          OUTPUT_BASE_PREFIX: output
+          REQUIRED_COLUMNS: id,name,city,state,country
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - S3ReadPolicy:
+            BucketName: !Ref DataBucket
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:HeadObject
+              - s3:PutObject
+            Resource:
+              - !Sub arn:aws:s3:::${DataBucket}/glue-scripts/*
+              - !Sub arn:aws:s3:::${DataBucket}/output/*
+              - !Sub arn:aws:s3:::${DataBucket}/temp/*
+        - Statement:
+            Effect: Allow
+            Action:
+              - glue:StartJobRun
+            Resource: !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${PartitionGlueJobName}
+      Events:
+        FileUploadEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref DataBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: input/
+                  - Name: suffix
+                    Value: .csv
+
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-glue-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${DataBucket}
+                  - !Sub arn:aws:s3:::${DataBucket}/*
+
+  PartitionGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Ref PartitionGlueJobName
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub "s3://${DataBucket}/glue-scripts/partition_job.py"
+      GlueVersion: '3.0'
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      DefaultArguments:
+        --job-language: python
+        --TempDir: !Sub "s3://${DataBucket}/temp/"
+        --enable-continuous-cloudwatch-log: 'true'
+      MaxCapacity: 2
+
+Parameters:
+  PartitionGlueJobName:
+    Type: String
+    Default: !Sub "${AWS::StackName}-partition-job"
+
+Outputs:
+  DataBucketName:
+    Description: S3 bucket for input data and output partitions
+    Value: !Ref DataBucket
+  GlueJobName:
+    Description: Glue job used to partition the data
+    Value: !Ref PartitionGlueJobName
+  LambdaFunctionName:
+    Description: Lambda function triggered by object uploads
+    Value: !Ref TriggerCheckerFunction

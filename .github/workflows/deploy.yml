@@ -30,7 +30,6 @@ steps:
       echo "========================================="
       echo "VERIFYING AWS IDENTITY"
       echo "========================================="
-
       aws sts get-caller-identity
 
   - name: Check repository files
@@ -38,10 +37,7 @@ steps:
       echo "========================================="
       echo "CHECKING REPOSITORY FILES"
       echo "========================================="
-
-      echo "Current directory:"
       pwd
-
       echo ""
       echo "Repository structure:"
       find . -maxdepth 4 -type f | sort

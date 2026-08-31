@@ -27,25 +27,24 @@ steps:
 
   - name: Verify AWS identity
     run: |
-      echo "Checking AWS identity..."
+      echo "========================================="
+      echo "VERIFYING AWS IDENTITY"
+      echo "========================================="
+
       aws sts get-caller-identity
 
-  - name: Check CloudFormation files
+  - name: Check repository files
     run: |
       echo "========================================="
-      echo "CHECKING PROJECT FILES"
+      echo "CHECKING REPOSITORY FILES"
       echo "========================================="
 
       echo "Current directory:"
       pwd
 
       echo ""
-      echo "Repository files:"
-      find . -maxdepth 3 -type f | sort
-
-      echo ""
-      echo "CloudFormation directory:"
-      ls -la cloudformation/
+      echo "Repository structure:"
+      find . -maxdepth 4 -type f | sort
 
   - name: Validate CloudFormation template
     run: |
@@ -54,7 +53,7 @@ steps:
       echo "========================================="
 
       aws cloudformation validate-template \
-        --template-body file://cloudformation/main.yaml \
+        --template-body file://s3-lambda-glue-cf-oidc-repo/template.yaml \
         --region us-east-1
 
   - name: Deploy CloudFormation stack
@@ -64,7 +63,7 @@ steps:
       echo "========================================="
 
       aws cloudformation deploy \
-        --template-file cloudformation/main.yaml \
+        --template-file s3-lambda-glue-cf-oidc-repo/template.yaml \
         --stack-name s3-lambda-glue-pipeline \
         --capabilities CAPABILITY_NAMED_IAM \
         --region us-east-1 \
@@ -118,18 +117,22 @@ steps:
 
   - name: Upload Glue script
     run: |
-      echo "Uploading Glue script..."
+      echo "========================================="
+      echo "UPLOADING GLUE SCRIPT"
+      echo "========================================="
 
       aws s3 cp \
-        glue/transform_data.py \
-        s3://$BUCKET_NAME/glue/transform_data.py
+        s3-lambda-glue-cf-oidc-repo/glue/job.py \
+        s3://$BUCKET_NAME/glue/job.py
 
   - name: Upload sample input
     run: |
-      echo "Uploading sample input..."
+      echo "========================================="
+      echo "UPLOADING SAMPLE INPUT"
+      echo "========================================="
 
       aws s3 cp \
-        sample-data/employees.csv \
+        s3-lambda-glue-cf-oidc-repo/sample-data/employees.csv \
         s3://$BUCKET_NAME/input/employees.csv
 
   - name: Deployment summary

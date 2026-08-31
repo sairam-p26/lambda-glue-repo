@@ -1,178 +1,99 @@
 name: Deploy AWS S3 Lambda Glue Pipeline
 
 on:
-
   push:
-
     branches:
       - main
 
-
 permissions:
-
   id-token: write
-
   contents: read
 
-
 jobs:
-
   deploy:
-
     name: Deploy to AWS
-
     runs-on: ubuntu-latest
-
 
     steps:
 
-      # ---------------------------------------------------
-      # CHECKOUT
-      # ---------------------------------------------------
-
       - name: Checkout repository
-
         uses: actions/checkout@v4
 
-
-      # ---------------------------------------------------
-      # AWS OIDC
-      # ---------------------------------------------------
-
       - name: Configure AWS credentials using OIDC
-
         uses: aws-actions/configure-aws-credentials@v4
-
         with:
-
-          role-to-assume:
-            ${{ secrets.AWS_ROLE_ARN }}
-
-          aws-region:
-            us-east-1
-
-
-      # ---------------------------------------------------
-      # VERIFY AWS
-      # ---------------------------------------------------
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
 
       - name: Verify AWS identity
-
         run: |
-
           aws sts get-caller-identity
 
-
-      # ---------------------------------------------------
-      # VALIDATE CLOUDFORMATION
-      # ---------------------------------------------------
-
       - name: Validate CloudFormation template
-
         run: |
-
           aws cloudformation validate-template \
             --template-body file://s3-lambda-glue-cf-oidc-repo/template.yaml \
             --region us-east-1
 
-
-      # ---------------------------------------------------
-      # DEPLOY CLOUDFORMATION
-      # ---------------------------------------------------
-
       - name: Deploy CloudFormation stack
-
+        id: deploy
+        continue-on-error: true
         run: |
-
           aws cloudformation deploy \
             --template-file s3-lambda-glue-cf-oidc-repo/template.yaml \
             --stack-name s3-lambda-glue-pipeline \
             --capabilities CAPABILITY_NAMED_IAM \
             --region us-east-1
 
+      - name: Show CloudFormation events
+        if: always()
+        run: |
+          echo "========================================="
+          echo "CLOUDFORMATION STACK EVENTS"
+          echo "========================================="
 
-      # ---------------------------------------------------
-      # GET CREATED S3 BUCKET
-      # ---------------------------------------------------
+          aws cloudformation describe-stack-events \
+            --stack-name s3-lambda-glue-pipeline \
+            --region us-east-1 \
+            --query "StackEvents[?contains(ResourceStatus,'FAILED')].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]" \
+            --output table || true
+
+      - name: Check deployment result
+        if: steps.deploy.outcome == 'failure'
+        run: |
+          echo "CloudFormation deployment FAILED."
+          exit 1
 
       - name: Get S3 bucket name
-
-        id: bucket
-
         run: |
-
           BUCKET_NAME=$(aws cloudformation describe-stacks \
             --stack-name s3-lambda-glue-pipeline \
+            --region us-east-1 \
             --query "Stacks[0].Outputs[?OutputKey=='DataBucketName'].OutputValue" \
-            --output text \
-            --region us-east-1)
+            --output text)
 
-          echo "Bucket: $BUCKET_NAME"
-
-          echo "bucket_name=$BUCKET_NAME" >> "$GITHUB_OUTPUT"
-
-
-      # ---------------------------------------------------
-      # UPLOAD GLUE SCRIPT
-      # ---------------------------------------------------
+          echo "S3 Bucket: $BUCKET_NAME"
+          echo "BUCKET_NAME=$BUCKET_NAME" >> $GITHUB_ENV
 
       - name: Upload Glue script
-
         run: |
-
           aws s3 cp \
-            s3-lambda-glue-cf-oidc-repo/src/glue/job.py \
-            s3://${{ steps.bucket.outputs.bucket_name }}/glue/job.py \
-            --region us-east-1
-
-
-      # ---------------------------------------------------
-      # UPLOAD SAMPLE INPUT
-      # ---------------------------------------------------
+            s3-lambda-glue-cf-oidc-repo/glue/job.py \
+            s3://$BUCKET_NAME/glue/job.py
 
       - name: Upload sample input
-
         run: |
-
           aws s3 cp \
-            s3-lambda-glue-cf-oidc-repo/sample/input.csv \
-            s3://${{ steps.bucket.outputs.bucket_name }}/input/input.csv \
-            --region us-east-1
-
-
-      # ---------------------------------------------------
-      # DEPLOYMENT COMPLETE
-      # ---------------------------------------------------
+            s3-lambda-glue-cf-oidc-repo/sample-data/employees.csv \
+            s3://$BUCKET_NAME/input/employees.csv
 
       - name: Deployment summary
-
         run: |
-
-          echo "=========================================="
-
-          echo "AWS S3 Lambda Glue Pipeline deployed"
-
-          echo "=========================================="
-
-          echo "S3 Bucket:"
-          echo "${{ steps.bucket.outputs.bucket_name }}"
-
-          echo ""
-
-          echo "Glue script uploaded"
-
-          echo ""
-
-          echo "Sample input uploaded"
-
-          echo ""
-
-          echo "Pipeline:"
-          echo "S3 -> EventBridge -> Lambda -> Glue"
-
-          echo ""
-
-          echo "Output:"
-          echo "S3 -> output/ -> city/state/country partitions"
-
-          echo "=========================================="
+          echo "========================================="
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "========================================="
+          echo "S3 Bucket: $BUCKET_NAME"
+          echo "Glue Job: city-state-country-partition-job"
+          echo "Input: s3://$BUCKET_NAME/input/employees.csv"
+          echo "Output: s3://$BUCKET_NAME/output/"
+          echo "========================================="

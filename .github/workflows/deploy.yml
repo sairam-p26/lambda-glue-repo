@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -26,22 +27,98 @@ jobs:
 
       - name: Verify AWS identity
         run: |
+          echo "========================================="
+          echo "VERIFYING AWS IDENTITY"
+          echo "========================================="
+
           aws sts get-caller-identity
 
       - name: Check repository files
         run: |
-          echo "Checking repository files..."
+          echo "========================================="
+          echo "CHECKING REPOSITORY FILES"
+          echo "========================================="
+
+          echo "Current directory:"
           pwd
+
+          echo ""
+          echo "Repository structure:"
           find . -maxdepth 4 -type f | sort
+
+          echo ""
+          echo "CloudFormation template:"
+          ls -lh s3-lambda-glue-cf-oidc-repo/template.yaml
 
       - name: Validate CloudFormation template
         run: |
+          echo "========================================="
+          echo "VALIDATING CLOUDFORMATION TEMPLATE"
+          echo "========================================="
+
           aws cloudformation validate-template \
             --template-body file://s3-lambda-glue-cf-oidc-repo/template.yaml \
             --region us-east-1
 
+          echo "CloudFormation template validation PASSED."
+
+      - name: Check existing CloudFormation stack
+        id: stack_check
+        continue-on-error: true
+        run: |
+          echo "========================================="
+          echo "CHECKING EXISTING CLOUDFORMATION STACK"
+          echo "========================================="
+
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name s3-lambda-glue-pipeline \
+            --region us-east-1 \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || echo "STACK_NOT_FOUND")
+
+          echo "Current stack status: $STACK_STATUS"
+
+          echo "STACK_STATUS=$STACK_STATUS" >> "$GITHUB_ENV"
+
+      - name: Delete failed CloudFormation stack
+        if: env.STACK_STATUS == 'ROLLBACK_COMPLETE'
+        run: |
+          echo "========================================="
+          echo "DELETING FAILED CLOUDFORMATION STACK"
+          echo "========================================="
+
+          echo "Stack is in ROLLBACK_COMPLETE."
+          echo "Deleting old stack before creating a new one..."
+
+          aws cloudformation delete-stack \
+            --stack-name s3-lambda-glue-pipeline \
+            --region us-east-1
+
+          echo "Waiting for stack deletion..."
+
+          aws cloudformation wait stack-delete-complete \
+            --stack-name s3-lambda-glue-pipeline \
+            --region us-east-1
+
+          echo "Old failed stack deleted successfully."
+
+      - name: Stop if stack is in an unsafe state
+        if: env.STACK_STATUS != 'STACK_NOT_FOUND' && env.STACK_STATUS != 'ROLLBACK_COMPLETE' && env.STACK_STATUS != 'CREATE_COMPLETE' && env.STACK_STATUS != 'UPDATE_COMPLETE'
+        run: |
+          echo "========================================="
+          echo "CLOUDFORMATION STACK IS IN AN UNSAFE STATE"
+          echo "========================================="
+
+          echo "Current stack status: $STACK_STATUS"
+          echo "Deployment stopped to avoid modifying an active/failed stack."
+          exit 1
+
       - name: Deploy CloudFormation stack
         run: |
+          echo "========================================="
+          echo "DEPLOYING CLOUDFORMATION STACK"
+          echo "========================================="
+
           aws cloudformation deploy \
             --template-file s3-lambda-glue-cf-oidc-repo/template.yaml \
             --stack-name s3-lambda-glue-pipeline \
@@ -49,9 +126,15 @@ jobs:
             --region us-east-1 \
             --no-fail-on-empty-changeset
 
+          echo "CloudFormation deployment completed."
+
       - name: Show CloudFormation stack status
         if: always()
         run: |
+          echo "========================================="
+          echo "CLOUDFORMATION STACK STATUS"
+          echo "========================================="
+
           aws cloudformation describe-stacks \
             --stack-name s3-lambda-glue-pipeline \
             --region us-east-1 \
@@ -61,14 +144,43 @@ jobs:
       - name: Show CloudFormation events
         if: always()
         run: |
+          echo "========================================="
+          echo "CLOUDFORMATION STACK EVENTS"
+          echo "========================================="
+
           aws cloudformation describe-stack-events \
             --stack-name s3-lambda-glue-pipeline \
             --region us-east-1 \
             --query "StackEvents[].[Timestamp,LogicalResourceId,ResourceType,ResourceStatus,ResourceStatusReason]" \
             --output table || true
 
+      - name: Verify CloudFormation stack
+        run: |
+          echo "========================================="
+          echo "VERIFYING CLOUDFORMATION STACK"
+          echo "========================================="
+
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name s3-lambda-glue-pipeline \
+            --region us-east-1 \
+            --query "Stacks[0].StackStatus" \
+            --output text)
+
+          echo "Final stack status: $STACK_STATUS"
+
+          if [ "$STACK_STATUS" != "CREATE_COMPLETE" ] && [ "$STACK_STATUS" != "UPDATE_COMPLETE" ]; then
+            echo "ERROR: CloudFormation stack is not healthy."
+            exit 1
+          fi
+
+          echo "CloudFormation stack is healthy."
+
       - name: Get S3 bucket name
         run: |
+          echo "========================================="
+          echo "GETTING S3 BUCKET NAME"
+          echo "========================================="
+
           BUCKET_NAME=$(aws cloudformation describe-stacks \
             --stack-name s3-lambda-glue-pipeline \
             --region us-east-1 \
@@ -85,23 +197,71 @@ jobs:
 
       - name: Upload Glue script
         run: |
+          echo "========================================="
+          echo "UPLOADING GLUE SCRIPT"
+          echo "========================================="
+
           aws s3 cp \
             s3-lambda-glue-cf-oidc-repo/glue/job.py \
             s3://$BUCKET_NAME/glue/job.py
 
+          echo "Glue script uploaded successfully."
+
       - name: Upload sample input
         run: |
+          echo "========================================="
+          echo "UPLOADING SAMPLE INPUT"
+          echo "========================================="
+
           aws s3 cp \
             s3-lambda-glue-cf-oidc-repo/sample-data/employees.csv \
             s3://$BUCKET_NAME/input/employees.csv
+
+          echo "Sample input uploaded successfully."
+
+      - name: Verify S3 files
+        run: |
+          echo "========================================="
+          echo "VERIFYING S3 FILES"
+          echo "========================================="
+
+          echo "Glue script:"
+          aws s3 ls s3://$BUCKET_NAME/glue/
+
+          echo ""
+          echo "Input files:"
+          aws s3 ls s3://$BUCKET_NAME/input/
 
       - name: Deployment summary
         run: |
           echo "========================================="
           echo "DEPLOYMENT SUCCESSFUL"
           echo "========================================="
-          echo "S3 Bucket: $BUCKET_NAME"
-          echo "Glue Job: city-state-country-partition-job"
-          echo "Input: s3://$BUCKET_NAME/input/employees.csv"
-          echo "Output: s3://$BUCKET_NAME/output/"
+
+          echo "CloudFormation Stack:"
+          echo "s3-lambda-glue-pipeline"
+
+          echo ""
+          echo "S3 Bucket:"
+          echo "$BUCKET_NAME"
+
+          echo ""
+          echo "Glue Job:"
+          echo "city-state-country-partition-job"
+
+          echo ""
+          echo "Input:"
+          echo "s3://$BUCKET_NAME/input/employees.csv"
+
+          echo ""
+          echo "Glue Script:"
+          echo "s3://$BUCKET_NAME/glue/job.py"
+
+          echo ""
+          echo "Output:"
+          echo "s3://$BUCKET_NAME/output/"
+
+          echo ""
+          echo "========================================="
+          echo "ALL DEPLOYMENT STEPS COMPLETED"
           echo "========================================="

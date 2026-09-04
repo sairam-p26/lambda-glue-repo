@@ -1,0 +1,222 @@
+name: Deploy Lambda + Glue Pipeline
+
+
+on:
+
+  push:
+
+    branches:
+      - main
+      - develop
+
+  workflow_dispatch:
+
+
+permissions:
+
+  id-token: write
+
+  contents: read
+
+
+env:
+
+  AWS_REGION: us-east-1
+
+  STACK_NAME: lambda-glue-repo
+
+
+jobs:
+
+  deploy:
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+      - name: Checkout repository
+
+        uses: actions/checkout@v4
+
+
+      - name: Configure AWS credentials using OIDC
+
+        uses: aws-actions/configure-aws-credentials@v4
+
+        with:
+
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      - name: Validate CloudFormation
+
+        run: |
+
+          aws cloudformation validate-template \
+            --template-body file://template.yaml
+
+
+      - name: Check CloudFormation stack
+
+        id: stack
+
+        shell: bash
+
+        run: |
+
+          set +e
+
+          STATUS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null)
+
+          EXIT_CODE=$?
+
+          set -e
+
+          if [ $EXIT_CODE -ne 0 ]; then
+
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+
+            echo "Stack does not exist."
+
+          else
+
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+
+            echo "Stack status: $STATUS"
+
+            if [ "$STATUS" = "ROLLBACK_COMPLETE" ] || [ "$STATUS" = "ROLLBACK_FAILED" ]; then
+
+              echo "Deleting failed stack..."
+
+              aws cloudformation delete-stack \
+                --stack-name "$STACK_NAME"
+
+              aws cloudformation wait stack-delete-complete \
+                --stack-name "$STACK_NAME"
+
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+
+            fi
+
+          fi
+
+
+      - name: Create S3 infrastructure
+
+        if: steps.stack.outputs.exists == 'false'
+
+        run: |
+
+          aws cloudformation deploy \
+            --template-file template.yaml \
+            --stack-name "$STACK_NAME" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ArtifactsReady=false \
+              Environment=dev \
+            --no-fail-on-empty-changeset
+
+
+      - name: Get artifact bucket name
+
+        id: bucket
+
+        run: |
+
+          BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ArtifactBucketName'].OutputValue" \
+            --output text)
+
+          echo "Artifact bucket: $BUCKET"
+
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+
+
+      - name: Package Lambda
+
+        run: |
+
+          mkdir -p build/lambda
+
+          cp src/lambda/handler.py build/lambda/handler.py
+
+          cd build/lambda
+
+          zip -r ../lambda.zip handler.py
+
+
+      - name: Upload Lambda and Glue artifacts
+
+        run: |
+
+          aws s3 cp \
+            build/lambda.zip \
+            "s3://${{ steps.bucket.outputs.bucket }}/lambda/lambda.zip"
+
+          aws s3 cp \
+            src/glue/job.py \
+            "s3://${{ steps.bucket.outputs.bucket }}/glue/job.py"
+
+
+      - name: Deploy Lambda and Glue
+
+        run: |
+
+          aws cloudformation deploy \
+            --template-file template.yaml \
+            --stack-name "$STACK_NAME" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              ArtifactsReady=true \
+              Environment=dev \
+            --no-fail-on-empty-changeset
+
+
+      - name: Upload sample input
+
+        run: |
+
+          aws s3 cp \
+            sample/input.csv \
+            "s3://${{ steps.bucket.outputs.bucket }}/input/input.csv"
+
+
+      - name: Verify CloudFormation
+
+        run: |
+
+          aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query "Stacks[0].StackStatus" \
+            --output text
+
+
+      - name: Verify S3 artifacts
+
+        run: |
+
+          aws s3 ls \
+            "s3://${{ steps.bucket.outputs.bucket }}/glue/"
+
+          aws s3 ls \
+            "s3://${{ steps.bucket.outputs.bucket }}/lambda/"
+
+          aws s3 ls \
+            "s3://${{ steps.bucket.outputs.bucket }}/input/"
+
+
+      - name: Verify Glue job
+
+        run: |
+
+          aws glue get-job \
+            --name csv-to-parquet-dev \
+            --query "Job.Name" \
+            --output text

@@ -1,0 +1,378 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: S3 -> EventBridge -> Lambda -> Glue -> Partitioned Parquet pipeline
+
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  ArtifactsReady:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+
+Conditions:
+
+  CreateApplicationResources:
+    !Equals
+      - !Ref ArtifactsReady
+      - 'true'
+
+
+Resources:
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+
+    Properties:
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+
+  LambdaExecutionRole:
+    Condition: CreateApplicationResources
+
+    Type: AWS::IAM::Role
+
+    Properties:
+
+      RoleName:
+        !Sub lambda-execution-role-${AWS::StackName}
+
+      AssumeRolePolicyDocument:
+
+        Version: '2012-10-17'
+
+        Statement:
+
+          - Effect: Allow
+
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+
+            Action:
+              - sts:AssumeRole
+
+
+      ManagedPolicyArns:
+
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+
+      Policies:
+
+        - PolicyName: LambdaPipelinePolicy
+
+          PolicyDocument:
+
+            Version: '2012-10-17'
+
+            Statement:
+
+              - Effect: Allow
+
+                Action:
+                  - s3:GetObject
+
+                Resource:
+                  !Sub '${ArtifactBucket.Arn}/input/*'
+
+
+              - Effect: Allow
+
+                Action:
+                  - glue:StartJobRun
+
+                Resource:
+                  !Sub 'arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/csv-to-parquet-${Environment}'
+
+
+  LambdaFunction:
+    Condition: CreateApplicationResources
+
+    Type: AWS::Lambda::Function
+
+    Properties:
+
+      FunctionName:
+        !Sub lambda-glue-demo-${Environment}
+
+      Runtime: python3.12
+
+      Handler: handler.lambda_handler
+
+      Role:
+        !GetAtt LambdaExecutionRole.Arn
+
+      Timeout: 60
+
+      MemorySize: 256
+
+      Environment:
+
+        Variables:
+
+          GLUE_JOB_NAME:
+            !Sub csv-to-parquet-${Environment}
+
+      Code:
+
+        S3Bucket:
+          !Ref ArtifactBucket
+
+        S3Key:
+          lambda/lambda.zip
+
+
+  GlueJobRole:
+    Condition: CreateApplicationResources
+
+    Type: AWS::IAM::Role
+
+    Properties:
+
+      RoleName:
+        !Sub AWSGlueServiceRole-${AWS::StackName}
+
+      AssumeRolePolicyDocument:
+
+        Version: '2012-10-17'
+
+        Statement:
+
+          - Effect: Allow
+
+            Principal:
+              Service:
+                - glue.amazonaws.com
+
+            Action:
+              - sts:AssumeRole
+
+
+      ManagedPolicyArns:
+
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+
+
+      Policies:
+
+        - PolicyName: GlueS3DataAccess
+
+          PolicyDocument:
+
+            Version: '2012-10-17'
+
+            Statement:
+
+              - Effect: Allow
+
+                Action:
+                  - s3:ListBucket
+
+                Resource:
+                  !GetAtt ArtifactBucket.Arn
+
+
+              - Effect: Allow
+
+                Action:
+                  - s3:GetObject
+
+                Resource:
+                  !Sub '${ArtifactBucket.Arn}/*'
+
+
+              - Effect: Allow
+
+                Action:
+                  - s3:PutObject
+                  - s3:AbortMultipartUpload
+
+                Resource:
+                  !Sub '${ArtifactBucket.Arn}/output/*'
+
+
+  GlueJob:
+    Condition: CreateApplicationResources
+
+    Type: AWS::Glue::Job
+
+    Properties:
+
+      Name:
+        !Sub csv-to-parquet-${Environment}
+
+      Role:
+        !GetAtt GlueJobRole.Arn
+
+      GlueVersion: '4.0'
+
+      NumberOfWorkers: 2
+
+      WorkerType: G.1X
+
+      Command:
+
+        Name: glueetl
+
+        PythonVersion: '3'
+
+        ScriptLocation:
+          !Sub s3://${ArtifactBucket}/glue/job.py
+
+
+      DefaultArguments:
+
+        '--job-language':
+          python
+
+        '--enable-metrics':
+          'true'
+
+        '--enable-continuous-cloudwatch-log':
+          'true'
+
+        '--SOURCE_PATH':
+          !Sub s3://${ArtifactBucket}/input/input.csv
+
+        '--TARGET_PATH':
+          !Sub s3://${ArtifactBucket}/output/
+
+        '--TempDir':
+          !Sub s3://${ArtifactBucket}/temp/
+
+
+      ExecutionProperty:
+
+        MaxConcurrentRuns: 1
+
+
+  S3ObjectCreatedRule:
+    Condition: CreateApplicationResources
+
+    Type: AWS::Events::Rule
+
+    Properties:
+
+      Description:
+        Trigger Lambda when CSV arrives in input prefix
+
+      EventPattern:
+
+        source:
+          - aws.s3
+
+        detail-type:
+          - Object Created
+
+        detail:
+
+          bucket:
+
+            name:
+              - !Ref ArtifactBucket
+
+          object:
+
+            key:
+
+              - prefix: input/
+
+
+      Targets:
+
+        - Arn:
+            !GetAtt LambdaFunction.Arn
+
+          Id:
+            LambdaTarget
+
+
+  EventBridgeLambdaPermission:
+    Condition: CreateApplicationResources
+
+    Type: AWS::Lambda::Permission
+
+    Properties:
+
+      FunctionName:
+        !Ref LambdaFunction
+
+      Action:
+        lambda:InvokeFunction
+
+      Principal:
+        events.amazonaws.com
+
+      SourceArn:
+        !GetAtt S3ObjectCreatedRule.Arn
+
+
+Outputs:
+
+  ArtifactBucketName:
+
+    Description:
+      S3 bucket used for artifacts and data
+
+    Value:
+      !Ref ArtifactBucket
+
+
+  LambdaFunctionName:
+
+    Condition: CreateApplicationResources
+
+    Description:
+      Lambda validation function
+
+    Value:
+      !Ref LambdaFunction
+
+
+  GlueJobName:
+
+    Condition: CreateApplicationResources
+
+    Description:
+      Glue ETL job
+
+    Value:
+      !Ref GlueJob
+
+
+  OutputPath:
+
+    Condition: CreateApplicationResources
+
+    Description:
+      Partitioned Parquet output
+
+    Value:
+      !Sub s3://${ArtifactBucket}/output/
